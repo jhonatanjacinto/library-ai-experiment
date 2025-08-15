@@ -1,0 +1,53 @@
+# .NET build artifacts
+**/bin/
+**/obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider/JetBrains IDE
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/
+
+# Docker volumes and data
+libraryaipgdata/
+libraryaimysqldata/
+libraryaiollamadata/
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+
+# Database dumps and init scripts (if generated)
+*.sql
+!docker/init/**
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Others
+*.swp
+*.bak
+
+# Ignore secrets
+**/appsettings.*.json
+!**/appsettings.json
+
+# Ignore test results
+TestResults/
+
+# Ignore coverage reports
+coverage/
+
+# Ignore docker-compose override files
+/docker-compose.override.yml

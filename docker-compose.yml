@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: libraryai-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_pass
+      POSTGRES_DB: libraryai_vector_db
+    volumes:
+      - libraryaipgdata:/var/lib/postgresql/data
+      - ./docker/init/postgres:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mysql:
+    image: mysql:8
+    container_name: libraryai-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql_db_pass
+      MYSQL_DATABASE: libraryai_db
+    volumes:
+      - libraryaimysqldata:/var/lib/mysql
+      - ./docker/init/mysql:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pmysql_db_pass"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: libraryai-ollama
+    volumes:
+      - libraryaiollamadata:/root/.ollama
+    networks:
+      - backend
+    entrypoint: >
+      sh -c "
+        ollama serve &
+        sleep 5 &&
+        ollama pull nomic-embed-text &&
+        ollama pull llama3.2 &&
+        wait
+      "
+    # No ports exposed (only accessible to other containers in backend network)
+
+  api:
+    build:
+      context: .
+      dockerfile: ./LibraryAI.WebApi/Dockerfile
+    container_name: libraryai-api
+    depends_on:
+      - postgres
+      - ollama
+    environment:
+      POSTGRES_CONNECTION: Host=postgres;Database=libraryai_vector_db;Username=postgres;Password=postgres_pass
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: 11434
+    ports:
+      - "5000:80"
+    networks:
+      - backend
+
+  sync:
+    build:
+      context: .
+      dockerfile: ./LibraryAI.SyncService/Dockerfile
+    container_name: libraryai-sync
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      POSTGRES_CONNECTION: Host=postgres;Database=libraryai_vector_db;Username=postgres;Password=postgres_pass
+      MYSQL_CONNECTION: Server=mysql;Database=libraryai_db;User=root;Password=mysql_db_pass
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: 11434
+    networks:
+      - backend
+
+volumes:
+  libraryaipgdata:
+  libraryaimysqldata:
+  libraryaiollamadata:
+
+networks:
+  backend:
+    driver: bridge
