@@ -73,11 +73,3 @@ docker compose down
 
 - Update environment variables in `docker-compose.yml` as needed for database credentials or ports.
 - Add your own LLM or embedding models to Ollama by modifying the `entrypoint` in the Ollama service.
-
-## License
-
-This project is licensed under the MIT License. See the `LICENSE` file for details.
-
----
-
-*Feel free to contribute or open issues to improve LibraryAI!*
