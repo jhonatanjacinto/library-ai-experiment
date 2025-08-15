@@ -45,7 +45,7 @@ app.MapPost("/search", async (HttpContext httpContext, IConfiguration config, IL
 			SELECT title, author, genre, summary, embedding <#> @embedding AS distance
 			FROM tbl_books
 			ORDER BY embedding <#> @embedding ASC
-			LIMIT 5;";
+			LIMIT 6;";
 		cmd.Parameters.AddWithValue("@embedding", new Vector(embedding));
 		await using var reader = await cmd.ExecuteReaderAsync();
 		while (await reader.ReadAsync())
@@ -55,41 +55,111 @@ app.MapPost("/search", async (HttpContext httpContext, IConfiguration config, IL
 				Title = reader.GetString(0),
 				Author = reader.GetString(1),
 				Genre = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                Summary = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+				Summary = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
 				Reason = string.Empty // Will be filled by Ollama
 			});
 		}
 	}
 
 	// Generate a 250-character reason for each book using Ollama
+	// STAGE 1: Semantic filtering to get the right 3 books
 	var ollamaGenUrl = $"http://{ollamaHost}:{ollamaPort}/api/generate";
 	using (var http = new HttpClient())
 	{
-		for (int i = 0; i < results.Count; i++)
+		// Step 1: Filter to 3 most appropriate books
+		var booksForFiltering = results.Select((b, idx) => $"{idx + 1}. \"{b.Title}\" by {b.Author} ({b.Genre}) - {(b.Summary.Length > 100 ? b.Summary.Substring(0, 100) + "..." : b.Summary)}");
+
+		var filterPrompt = $"""
+		USER QUERY: "{request.Query}"
+		
+		From these 6 books, which 3 are most appropriate? 
+		Important: If the user says they DON'T want something, exclude it completely.
+		
+		BOOKS:
+		{string.Join("\n", booksForFiltering)}
+		
+		Respond with ONLY the 3 numbers (e.g., "2, 4, 6") of the best matches, considering semantic meaning and user preferences.
+		""";
+
+		var filterReq = new { model = "llama3.2", prompt = filterPrompt, stream = false };
+
+		List<int> selectedIndices = new List<int>();
+		try
 		{
-			var book = results[i];
-			var prompt = $"Given the user search: '{request.Query}', and the book: Title: '{book.Title}', Author: '{book.Author}', Genre: '{book.Genre}', Summary: '{book.Summary}', write a 250-character reason why this book is a good recommendation for the user. Only output the reason, no intro or extra text.";
-			var ollamaGenReq = new { model = "llama3.2", prompt = prompt, stream = false, options = new { num_predict = 250 } };
-			try
+			var filterResp = await http.PostAsJsonAsync(ollamaGenUrl, filterReq);
+			if (filterResp.IsSuccessStatusCode)
 			{
-				var resp = await http.PostAsJsonAsync(ollamaGenUrl, ollamaGenReq);
-				if (resp.IsSuccessStatusCode)
+				var filterContent = await filterResp.Content.ReadFromJsonAsync<OllamaGenerateResponse>();
+				var numbersText = filterContent?.Response?.Trim() ?? "";
+				logger.LogInformation($"Filter response: {numbersText}");
+
+				// Parse the numbers (handles formats like "1, 3, 5" or "1 3 5" or "1,3,5")
+				var numbers = System.Text.RegularExpressions.Regex.Matches(numbersText, @"\d+")
+					.Cast<System.Text.RegularExpressions.Match>()
+					.Select(m => int.Parse(m.Value))
+					.Where(n => n >= 1 && n <= 6)
+					.Take(3)
+					.ToList();
+
+				if (numbers.Count >= 2) // At least 2 valid selections
 				{
-					var genResp = await resp.Content.ReadFromJsonAsync<OllamaGenerateResponse>();
-					book.Reason = genResp?.Response?.Trim() ?? "";
+					selectedIndices = numbers;
 				}
-				else
-				{
-                    logger.LogWarning($"Failed to generate reason for book ID {book.Title}: {resp.StatusCode}");
-					book.Reason = "Recommended due to high similarity to your query.";
-				}
-			}
-			catch(Exception ex)
-			{
-                logger.LogWarning($"Error generating reason for book ID {book.Title}: {ex.Message}");
-				book.Reason = "Recommended due to high similarity to your query.";
 			}
 		}
+		catch (Exception ex)
+		{
+			logger.LogWarning($"Filtering stage failed: {ex.Message}");
+		}
+
+		// Fallback if filtering failed
+		if (selectedIndices.Count == 0)
+		{
+			selectedIndices = new List<int> { 1, 2, 3 }; // Use first 3
+			logger.LogInformation("Using fallback selection: first 3 books");
+		}
+
+		// Select the filtered books
+		var filteredResults = selectedIndices.Select(i => results[i - 1]).ToList();
+
+		// STAGE 2: Generate reasons for the selected books (in parallel)
+		var reasonTasks = filteredResults.Select(async book =>
+		{
+			var reasonPrompt = $"""
+			Query: "{request.Query}"
+			Book: "{book.Title}" by {book.Author}
+			Genre: {book.Genre}
+			Summary: {book.Summary}
+			
+			Write one concise sentence (max 180 chars) explaining why this book perfectly matches the user's query.
+			""";
+
+			var reasonReq = new { model = "llama3.2", prompt = reasonPrompt, stream = false };
+			try
+			{
+				var reasonResp = await http.PostAsJsonAsync(ollamaGenUrl, reasonReq);
+				if (reasonResp.IsSuccessStatusCode)
+				{
+					var reasonContent = await reasonResp.Content.ReadFromJsonAsync<OllamaGenerateResponse>();
+					return reasonContent?.Response?.Trim() ?? "Excellent match based on semantic analysis.";
+				}
+			}
+			catch (Exception ex)
+			{
+				logger.LogWarning($"Reason generation failed for {book.Title}: {ex.Message}");
+			}
+			return "Excellent match based on semantic analysis.";
+		});
+
+		var reasons = await Task.WhenAll(reasonTasks);
+
+		// Assign reasons to filtered results
+		for (int i = 0; i < filteredResults.Count && i < reasons.Length; i++)
+		{
+			filteredResults[i].Reason = reasons[i];
+		}
+
+		results = filteredResults;
 	}
 
 	return Results.Ok(results);
@@ -110,7 +180,7 @@ public class BookRecommendation
 	public string Title { get; set; } = string.Empty;
 	public string Author { get; set; } = string.Empty;
 	public string Genre { get; set; } = string.Empty;
-    public string Summary { get; set; } = string.Empty;
+	public string Summary { get; set; } = string.Empty;
 	public string Reason { get; set; } = string.Empty;
 }
 
